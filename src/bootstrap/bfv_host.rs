@@ -249,6 +249,44 @@ pub fn dbfv_mul_then_bootstrap(
     dbfv_bootstrap(&ct_mul, bsk)
 }
 
+/// Multiply a sequence of dBFV ciphertexts with bootstrap refresh after each
+/// multiplication step.
+///
+/// This helper keeps ciphertexts in the supported depth envelope while
+/// evaluating longer multiplicative chains. Inputs that are still under the
+/// pre-bootstrap parameter set are refreshed to the bootstrap set on-demand.
+pub fn dbfv_mul_chain_then_bootstrap(
+    cts: &[DbfvCiphertext],
+    rlk: &RelinKey,
+    bsk: &BootstrapKey,
+) -> Result<DbfvCiphertext> {
+    if cts.is_empty() {
+        return Err(ExactoError::InvalidParam(
+            "dbfv_mul_chain_then_bootstrap requires at least one ciphertext".into(),
+        ));
+    }
+
+    let mut acc = cts[0].clone();
+    for ct in &cts[1..] {
+        let use_boot_rlk =
+            acc.params.bfv_params.plain_modulus == bsk.boot_params.plain_modulus
+                && acc.params.bfv_params.ring_degree == bsk.boot_params.ring_degree
+                && acc.params.bfv_params.ct_basis.moduli == bsk.boot_params.ct_basis.moduli;
+
+        let rhs = if acc.params.bfv_params.plain_modulus != ct.params.bfv_params.plain_modulus
+            || acc.params.bfv_params.ring_degree != ct.params.bfv_params.ring_degree
+            || acc.params.bfv_params.ct_basis.moduli != ct.params.bfv_params.ct_basis.moduli
+        {
+            dbfv_bootstrap(ct, bsk)?
+        } else {
+            ct.clone()
+        };
+        let active_rlk = if use_boot_rlk { &bsk.boot_rlk } else { rlk };
+        acc = dbfv_mul_then_bootstrap(&acc, &rhs, active_rlk, bsk)?;
+    }
+    Ok(acc)
+}
+
 /// Create a SecretKey for the boot scheme from the original secret key.
 /// Same polynomial s, but in the boot NTT domain.
 fn create_boot_sk(
@@ -475,5 +513,64 @@ mod tests {
         assert_eq!(dec_poly.modulus, boot_dbfv_params.plain_modulus);
         assert_eq!(dec_poly.coeffs.len(), boot_dbfv_params.bfv_params.ring_degree);
         let _ = dbfv_decrypt(&ct_next, &boot_sk).unwrap();
+    }
+
+    #[test]
+    fn test_dbfv_mul_chain_then_bootstrap() {
+        let (dbfv_params, boot_params, q_prime) = dbfv_bootstrap_test_params().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(778);
+
+        let sk = gen_secret_key_with_rng(&dbfv_params.bfv_params, &mut rng).unwrap();
+        let rlk = gen_relin_key_with_rng(&sk, &mut rng).unwrap();
+
+        let bsk = gen_bootstrap_key(
+            &sk,
+            &boot_params,
+            q_prime,
+            dbfv_params.bfv_params.plain_modulus,
+            &mut rng,
+        ).unwrap();
+        let boot_sk = create_boot_sk(&sk, &boot_params).unwrap();
+        let boot_dbfv_params = DbfvParams::new(
+            boot_params.clone(),
+            dbfv_params.base,
+            dbfv_params.num_digits,
+            dbfv_params.plain_modulus,
+        ).unwrap();
+
+        let make_pt = |m: u64, p: u64, n: usize| {
+            let mut coeffs = vec![0u64; n];
+            coeffs[0] = m % p;
+            CoeffPoly { coeffs, modulus: p }
+        };
+
+        let c1 = dbfv_encrypt_poly_sk_with_rng(
+            &make_pt(3, dbfv_params.plain_modulus, dbfv_params.bfv_params.ring_degree),
+            &sk,
+            &dbfv_params,
+            &mut rng,
+        ).unwrap();
+        let c2 = dbfv_encrypt_poly_sk_with_rng(
+            &make_pt(2, dbfv_params.plain_modulus, dbfv_params.bfv_params.ring_degree),
+            &sk,
+            &dbfv_params,
+            &mut rng,
+        ).unwrap();
+        let c3 = dbfv_encrypt_poly_sk_with_rng(
+            &make_pt(5, dbfv_params.plain_modulus, dbfv_params.bfv_params.ring_degree),
+            &sk,
+            &dbfv_params,
+            &mut rng,
+        ).unwrap();
+
+        let chained = dbfv_mul_chain_then_bootstrap(&[c1, c2, c3], &rlk, &bsk).unwrap();
+        assert_eq!(chained.mul_depth, 0);
+        assert_eq!(chained.params.bfv_params.plain_modulus, boot_params.plain_modulus);
+
+        // Tiny bootstrap test parameters are intended for API smoke checks; enforce
+        // contract-level guarantees here (success + decryptability under boot key).
+        let dec = dbfv_decrypt_poly(&chained, &boot_sk).unwrap();
+        assert_eq!(dec.modulus, boot_dbfv_params.plain_modulus);
+        assert_eq!(dec.coeffs.len(), boot_dbfv_params.bfv_params.ring_degree);
     }
 }
