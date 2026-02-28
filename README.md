@@ -39,6 +39,12 @@ fn main() {
 }
 ```
 
+### Multiply a chain safely (auto-refresh between steps)
+
+Use `dbfv_mul_chain_then_bootstrap(cts, rlk, bsk)` to evaluate long multiplicative
+chains while keeping ciphertexts in the supported depth envelope. The function applies
+`dbfv_mul_then_bootstrap` at each step.
+
 ### Add and subtract
 
 ```rust
@@ -148,6 +154,13 @@ Run with `cargo bench`. Compact preset (n=1024, 40-bit q):
 | dBFV encrypt      | ~630 us |
 | dBFV add          | ~4 us   |
 | dBFV mul          | ~830 us |
+
+Paper-style reproduction (u64 profiles, latency + growth + depth probe):
+
+```bash
+cargo run --release --bin paper_repro
+cat reports/paper_reproduction.md
+```
 
 ## Testing
 
